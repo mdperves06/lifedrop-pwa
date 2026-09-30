@@ -1,0 +1,654 @@
+// LifeDrop — Blood Donation Management System
+// Development uses SQLite (zero-install). For production switch `provider` to
+// "postgresql" and point DATABASE_URL at PostgreSQL — see DATABASE.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── Enums ───────────────────────────────
+
+enum Role {
+  DONOR // regular user: donor + requester capabilities
+  CENTER_STAFF
+  HOSPITAL
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  REMOVED
+}
+
+enum BloodGroup {
+  A_POS
+  A_NEG
+  B_POS
+  B_NEG
+  O_POS
+  O_NEG
+  AB_POS
+  AB_NEG
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  UNDISCLOSED
+}
+
+enum Availability {
+  AVAILABLE
+  TEMP_UNAVAILABLE
+  NOT_AVAILABLE
+}
+
+enum TokenType {
+  EMAIL_VERIFY
+  PHONE_OTP
+  PASSWORD_RESET
+}
+
+enum LocationType {
+  DIVISION
+  DISTRICT
+  AREA
+}
+
+enum CenterStatusOverride {
+  AUTO
+  OPEN
+  CLOSED
+  FULL
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CHECKED_IN
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum BatchStatus {
+  AVAILABLE
+  RESERVED
+  USED
+  EXPIRED
+  DISCARDED
+}
+
+enum InventoryReason {
+  DONATION
+  ISSUE
+  EXPIRED
+  ADJUSTMENT
+  DISCARD
+}
+
+enum RequestPriority {
+  NORMAL
+  URGENT
+  EMERGENCY
+}
+
+enum RequestStatus {
+  DRAFT
+  OPEN
+  MATCHING
+  DONOR_CONTACTED
+  DONOR_ACCEPTED
+  FULFILLED
+  CLOSED
+  CANCELLED
+  EXPIRED
+}
+
+enum ContactPreference {
+  IN_APP
+  PHONE
+  BOTH
+}
+
+enum DonationRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
+  EXPIRED
+  DONATED
+}
+
+enum MatchSource {
+  DIRECT
+  AUTO_MATCH
+}
+
+enum NotificationType {
+  DONATION_REQUEST
+  EMERGENCY_ALERT
+  REQUEST_ACCEPTED
+  REQUEST_DECLINED
+  REQUEST_CANCELLED
+  REQUEST_STATUS
+  APPOINTMENT_REMINDER
+  APPOINTMENT_UPDATE
+  LOW_STOCK
+  ANNOUNCEMENT
+  ACCOUNT
+  REPORT_UPDATE
+}
+
+enum ReportReason {
+  FAKE_DONOR
+  SPAM
+  ABUSE
+  FRAUD
+  INCORRECT_INFO
+  INAPPROPRIATE
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+enum ModerationAction {
+  NONE
+  WARN
+  SUSPEND
+  REMOVE
+}
+
+enum CampaignStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum Audience {
+  ALL
+  DONORS
+  HOSPITALS
+  STAFF
+}
+
+// ─────────────────────────────── Users ───────────────────────────────
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  phone           String     @unique
+  passwordHash    String
+  name            String
+  role            Role       @default(DONOR)
+  status          UserStatus @default(ACTIVE)
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  locale          String     @default("en")
+  avatarPath      String?
+  dateOfBirth     DateTime?
+  gender          Gender     @default(UNDISCLOSED)
+  organization    String?
+  note            String?
+  // Coarse location only (area level) — never exact GPS.
+  locationId      String?
+  location        Location?  @relation(fields: [locationId], references: [id])
+  referralCode    String     @unique
+  referredById    String?
+  referredBy      User?      @relation("Referrals", fields: [referredById], references: [id])
+  referrals       User[]     @relation("Referrals")
+  // Staff / hospital affiliation
+  centerId        String?
+  center          Center?    @relation("CenterStaff", fields: [centerId], references: [id])
+  hospitalId      String?
+  hospital        Hospital?  @relation("HospitalStaff", fields: [hospitalId], references: [id])
+  // Bumped to invalidate all existing JWT sessions (logout everywhere, password reset, suspension)
+  tokenVersion    Int        @default(0)
+  lastActiveAt    DateTime   @default(now())
+  warnings        Int        @default(0)
+  isDemo          Boolean    @default(false)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  deletedAt       DateTime?
+
+  donorProfile          DonorProfile?
+  tokens                VerificationToken[]
+  appointments          Appointment[]
+  donations             Donation[]          @relation("DonorDonations")
+  recordedDonations     Donation[]          @relation("RecordedBy")
+  bloodRequests         BloodRequest[]
+  donationRequests      DonationRequest[]
+  notifications         Notification[]
+  pushSubscriptions     PushSubscription[]
+  reviews               Review[]
+  reportsFiled          Report[]            @relation("Reporter")
+  reportsAgainst        Report[]            @relation("ReportTarget")
+  reportsResolved       Report[]            @relation("ReportResolver")
+  auditLogs             AuditLog[]
+  campaigns             Campaign[]
+  announcements         Announcement[]
+  inventoryLogs         InventoryLog[]
+  requestStatusEvents   RequestStatusEvent[]
+
+  @@index([role, status])
+  @@index([locationId])
+}
+
+model DonorProfile {
+  id                     String       @id @default(cuid())
+  userId                 String       @unique
+  user                   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bloodGroup             BloodGroup
+  weightKg               Int?
+  availability           Availability @default(AVAILABLE)
+  emergencyAvailable     Boolean      @default(true)
+  lastDonationDate       DateTime?
+  nextAvailableDate      DateTime?
+  // Self-declared; not a medical assessment.
+  healthDeclarationOk    Boolean      @default(false)
+  healthNotes            String?
+  // Privacy — contact revealed only after the donor accepts a request.
+  sharePhoneAfterAccept  Boolean      @default(true)
+  shareEmailAfterAccept  Boolean      @default(false)
+  showInSearch           Boolean      @default(true)
+  // Denormalised for fast matching (mirrors User.locationId)
+  locationId             String?
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@index([bloodGroup, availability, locationId])
+  @@index([locationId])
+}
+
+model VerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      TokenType
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@index([userId, type])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ───────────────────────────── Locations ─────────────────────────────
+
+model Location {
+  id        String       @id @default(cuid())
+  name      String
+  nameBn    String?
+  type      LocationType
+  parentId  String?
+  parent    Location?    @relation("LocationTree", fields: [parentId], references: [id])
+  children  Location[]   @relation("LocationTree")
+  // Approximate centroid — used for coarse radius matching only.
+  lat       Float?
+  lng       Float?
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+
+  users         User[]
+  centers       Center[]
+  hospitals     Hospital[]
+  bloodRequests BloodRequest[]
+  campaigns     Campaign[]
+
+  @@unique([parentId, name])
+  @@index([type, parentId])
+}
+
+// ───────────────────────── Centers & hospitals ─────────────────────────
+
+model Center {
+  id                String               @id @default(cuid())
+  name              String
+  address           String
+  phone             String
+  email             String?
+  locationId        String
+  location          Location             @relation(fields: [locationId], references: [id])
+  lat               Float
+  lng               Float
+  openTime          String               @default("08:00") // HH:mm
+  closeTime         String               @default("18:00")
+  openDays          String               @default("0,1,2,3,4,6") // 0=Sun … 6=Sat
+  capacityPerSlot   Int                  @default(4) // donors per hourly slot
+  staffCount        Int                  @default(5)
+  beds              Int                  @default(4)
+  equipment         String               @default("[]") // JSON string[]
+  neededBloodGroups String               @default("") // CSV of BloodGroup
+  statusOverride    CenterStatusOverride @default(AUTO)
+  description       String?
+  isActive          Boolean              @default(true)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  staff         User[]           @relation("CenterStaff")
+  appointments  Appointment[]
+  donations     Donation[]
+  batches       InventoryBatch[]
+  inventoryLogs InventoryLog[]
+  reviews       Review[]
+  campaigns     Campaign[]
+
+  @@index([locationId])
+}
+
+model Hospital {
+  id         String   @id @default(cuid())
+  name       String
+  address    String
+  phone      String
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+  lat        Float?
+  lng        Float?
+  verified   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  staff    User[]         @relation("HospitalStaff")
+  requests BloodRequest[]
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  centerId  String
+  center    Center   @relation(fields: [centerId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([centerId, userId])
+}
+
+// ─────────────────────── Appointments & donations ───────────────────────
+
+model Appointment {
+  id               String            @id @default(cuid())
+  donorId          String
+  donor            User              @relation(fields: [donorId], references: [id], onDelete: Cascade)
+  centerId         String
+  center           Center            @relation(fields: [centerId], references: [id])
+  startsAt         DateTime
+  status           AppointmentStatus @default(BOOKED)
+  isWalkIn         Boolean           @default(false)
+  notes            String?
+  campaignId       String?
+  campaign         Campaign?         @relation(fields: [campaignId], references: [id])
+  reminder24SentAt DateTime?
+  reminder1SentAt  DateTime?
+  cancelledReason  String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  donation Donation?
+
+  @@index([centerId, startsAt])
+  @@index([donorId, status])
+  @@index([status, startsAt])
+}
+
+model Donation {
+  id             String        @id @default(cuid())
+  donorId        String
+  donor          User          @relation("DonorDonations", fields: [donorId], references: [id], onDelete: Cascade)
+  centerId       String?
+  center         Center?       @relation(fields: [centerId], references: [id])
+  appointmentId  String?       @unique
+  appointment    Appointment?  @relation(fields: [appointmentId], references: [id])
+  bloodRequestId String?
+  bloodRequest   BloodRequest? @relation(fields: [bloodRequestId], references: [id])
+  bloodGroup     BloodGroup
+  volumeMl       Int           @default(450)
+  units          Int           @default(1)
+  donatedAt      DateTime      @default(now())
+  recordedById   String?
+  recordedBy     User?         @relation("RecordedBy", fields: [recordedById], references: [id])
+  notes          String?
+  certificateNo  String        @unique
+  createdAt      DateTime      @default(now())
+
+  batches InventoryBatch[]
+
+  @@index([donorId, donatedAt])
+  @@index([donatedAt])
+}
+
+// ─────────────────────────────── Inventory ───────────────────────────────
+
+model InventoryBatch {
+  id          String      @id @default(cuid())
+  centerId    String
+  center      Center      @relation(fields: [centerId], references: [id])
+  bloodGroup  BloodGroup
+  units       Int
+  collectedAt DateTime
+  expiresAt   DateTime
+  status      BatchStatus @default(AVAILABLE)
+  donationId  String?
+  donation    Donation?   @relation(fields: [donationId], references: [id])
+  issuedToRequestId String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  logs InventoryLog[]
+
+  @@index([centerId, bloodGroup, status])
+  @@index([status, expiresAt])
+}
+
+model InventoryLog {
+  id         String          @id @default(cuid())
+  centerId   String
+  center     Center          @relation(fields: [centerId], references: [id])
+  bloodGroup BloodGroup
+  change     Int
+  reason     InventoryReason
+  batchId    String?
+  batch      InventoryBatch? @relation(fields: [batchId], references: [id])
+  userId     String?
+  user       User?           @relation(fields: [userId], references: [id])
+  note       String?
+  createdAt  DateTime        @default(now())
+
+  @@index([createdAt])
+  @@index([centerId, bloodGroup])
+}
+
+// ─────────────────────────── Blood requests ───────────────────────────
+
+model BloodRequest {
+  id                String            @id @default(cuid())
+  requesterId       String
+  requester         User              @relation(fields: [requesterId], references: [id])
+  hospitalId        String?
+  hospital          Hospital?         @relation(fields: [hospitalId], references: [id])
+  bloodGroup        BloodGroup
+  units             Int
+  patientName       String
+  hospitalName      String
+  hospitalAddress   String?
+  locationId        String
+  location          Location          @relation(fields: [locationId], references: [id])
+  neededAt          DateTime
+  priority          RequestPriority   @default(NORMAL)
+  status            RequestStatus     @default(OPEN)
+  notes             String?
+  contactPreference ContactPreference @default(IN_APP)
+  contactPhone      String?
+  unitsFulfilled    Int               @default(0)
+  matchRadiusKm     Float?
+  closedAt          DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  donationRequests DonationRequest[]
+  statusEvents     RequestStatusEvent[]
+  donations        Donation[]
+  reports          Report[]
+
+  @@index([status, priority, createdAt])
+  @@index([locationId, bloodGroup, status])
+  @@index([requesterId, status])
+}
+
+model RequestStatusEvent {
+  id         String         @id @default(cuid())
+  requestId  String
+  request    BloodRequest   @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  fromStatus RequestStatus?
+  toStatus   RequestStatus
+  actorId    String?
+  actor      User?          @relation(fields: [actorId], references: [id])
+  note       String?
+  createdAt  DateTime       @default(now())
+
+  @@index([requestId, createdAt])
+}
+
+model DonationRequest {
+  id             String                @id @default(cuid())
+  bloodRequestId String
+  bloodRequest   BloodRequest          @relation(fields: [bloodRequestId], references: [id], onDelete: Cascade)
+  donorId        String
+  donor          User                  @relation(fields: [donorId], references: [id], onDelete: Cascade)
+  status         DonationRequestStatus @default(PENDING)
+  source         MatchSource           @default(DIRECT)
+  message        String?
+  distanceKm     Float?
+  respondedAt    DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  notifications Notification[]
+
+  @@unique([bloodRequestId, donorId])
+  @@index([donorId, status])
+}
+
+// ─────────────────────────── Notifications ───────────────────────────
+
+model Notification {
+  id                String            @id @default(cuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              NotificationType
+  title             String
+  message           String
+  link              String?
+  bloodRequestId    String?
+  donationRequestId String?
+  donationRequest   DonationRequest?  @relation(fields: [donationRequestId], references: [id], onDelete: SetNull)
+  readAt            DateTime?
+  createdAt         DateTime          @default(now())
+
+  @@index([userId, readAt, createdAt])
+}
+
+model Announcement {
+  id          String   @id @default(cuid())
+  title       String
+  message     String
+  audience    Audience @default(ALL)
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  recipients  Int      @default(0)
+  createdAt   DateTime @default(now())
+}
+
+// ───────────────────────────── Moderation ─────────────────────────────
+
+model Report {
+  id             String           @id @default(cuid())
+  reporterId     String
+  reporter       User             @relation("Reporter", fields: [reporterId], references: [id])
+  targetUserId   String?
+  targetUser     User?            @relation("ReportTarget", fields: [targetUserId], references: [id])
+  bloodRequestId String?
+  bloodRequest   BloodRequest?    @relation(fields: [bloodRequestId], references: [id])
+  reason         ReportReason
+  details        String?
+  status         ReportStatus     @default(PENDING)
+  action         ModerationAction @default(NONE)
+  adminNote      String?
+  resolvedById   String?
+  resolvedBy     User?            @relation("ReportResolver", fields: [resolvedById], references: [id])
+  resolvedAt     DateTime?
+  createdAt      DateTime         @default(now())
+
+  @@index([status, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String
+  entityType String
+  entityId   String?
+  meta       String? // JSON
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+}
+
+// ───────────────────────────── Campaigns ─────────────────────────────
+
+model Campaign {
+  id           String         @id @default(cuid())
+  title        String
+  description  String
+  venue        String
+  locationId   String
+  location     Location       @relation(fields: [locationId], references: [id])
+  centerId     String?
+  center       Center?        @relation(fields: [centerId], references: [id])
+  startsAt     DateTime
+  endsAt       DateTime
+  targetDonors Int            @default(50)
+  status       CampaignStatus @default(PLANNED)
+  createdById  String
+  createdBy    User           @relation(fields: [createdById], references: [id])
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  appointments Appointment[]
+
+  @@index([status, startsAt])
+}
+
+model AppSetting {
+  key       String   @id
+  value     String // JSON
+  updatedAt DateTime @updatedAt
+}
